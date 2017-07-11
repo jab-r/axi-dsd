@@ -102,6 +102,8 @@ struct axi_dsd {
     uint bclk_rate;
     bool clk_fam;
     bool is_dsd;
+    device *dev;
+    device *dev_dma;
     
 
 	//struct snd_soc_dai_driver dai_driver;
@@ -110,6 +112,10 @@ struct axi_dsd {
 
 	struct snd_ratnum ratnum[2];
 	struct snd_pcm_hw_constraint_ratnums rate_constraints;
+};
+struct axi_dsd_ruledata {
+    struct axi_dsd *dsd;
+    int serializers;
 };
 static int axi_dsd_set_hw_flags(struct axi_dsd *dsd,bool immed)
 {
@@ -151,6 +157,8 @@ static int axi_dsd_trigger(struct snd_pcm_substream *substream, int cmd,
 
 	return val;
 }
+static uint axi_dsd_channels(struct axi_dsd *dsd){ return dsd->nchan; };
+static bool axi_dsd_is_dsd(struct axi_dsd *dsd){ return dsd->is_dsd;};
 static bool is_dsd(snd_pcm_format_t format)
 {
     switch (format) {
@@ -176,6 +184,7 @@ static bool axi_dsd_clk_fam(uint rate)
     case 176400 :
     case 352800 :
     case 705600 :
+    case 1411200 :
         return false;
             break;
     case 48000 :
@@ -183,6 +192,7 @@ static bool axi_dsd_clk_fam(uint rate)
     case 192000 :
     case 384000 :
     case 768000 :
+    case 1536000 :
         return true;
             break;
     default:
@@ -206,6 +216,7 @@ static int get_controller_flags(struct axi_dsd *dsd, bool immed)
     if (immed) flags |= AXI_DSD_BIT_RESET_PARAMS;
     return flags;
 }
+
 static int axi_dsd_hw_params(struct snd_pcm_substream *substream,
 	struct snd_pcm_hw_params *params, struct snd_soc_dai *dai)
 {
@@ -249,19 +260,151 @@ static int axi_dsd_dai_set_clkdiv(struct snd_soc_dai *cpu_dai,
     dev->clk_div = div;
     return 0;
 }
+static const unsigned int axi_dsd_dai_rates[] = {
+    44100, 48000,
+    88200, 96000,
+    176400, 192000,
+    352800, 384000,
+    705600, 768000,
+    1411200, 1536000
+};
+
+#define AXI_DSD_MAX_RATE_ERROR_PPM 1000
+static int axi_dsd_calc_clk_div(struct axi_dsd *dsd,
+                                      unsigned int bclk_freq,
+                                      int *error_ppm)
+{
+    int div; //= mcasp->sysclk_freq / bclk_freq;
+    int rem; //= mcasp->sysclk_freq % bclk_freq;
+    int iclk = axi_dsd_clk_fam(bclk_freq) ? 1 : 0;
+
+    div = dsd->ratnum[iclk].ratnum / bclk_freq;
+    rem = dsd->ratnum[iclk].ratnum % bclk_freq;
+                              
+    if (rem != 0) {
+        if (div == 0 ||
+            ((dsd->ratnum[iclk].ratnum / div) - bclk_freq) >
+            (bclk_freq - (dsd->ratnum[iclk].ratnum / (div+1)))) {
+            div++;
+            rem = rem - bclk_freq;
+        }
+    }
+    if (error_ppm)
+        *error_ppm =
+        (div*1000000 + (int)div64_long(1000000LL*rem,
+                                       (int)bclk_freq))
+        /div - 1000000;
+    
+    return div;
+}
+static int axi_dsd_hw_rule_rate(struct snd_pcm_hw_params *params,
+                                      struct snd_pcm_hw_rule *rule)
+{
+    struct axi_dsd_ruledata *rd = rule->private;
+    struct snd_interval *ri = hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
+    // int sbits = params_width(params);
+    // int slots = rd->dsd->tdm_slots;
+    struct snd_interval range;
+    int i;
+    
+    /* if (rd->dsd->slot_width)
+        sbits = rd->dsd->slot_width;
+    */
+    snd_interval_any(&range);
+    range.empty = 1;
+    
+    for (i = 0; i < ARRAY_SIZE(axi_dsd_dai_rates); i++) {
+        if (snd_interval_test(ri, axi_dsd_dai_rates[i])) {
+            uint bclk_freq = AXI_DSD_FRAME_WIDTH * axi_dsd_channels(rd->dsd)  * axi_dsd_dai_rates[i];
+            int ppm;
+            
+            axi_dsd_calc_clk_div(rd->dsd, bclk_freq, &ppm);
+            if (abs(ppm) < AXI_DSD_MAX_RATE_ERROR_PPM) {
+                if (range.empty) {
+                    range.min = axi_dsd_dai_rates[i];
+                    range.empty = 0;
+                }
+                range.max = axi_dsd_dai_rates[i];
+            }
+        }
+    }
+    
+    dev_dbg(rd->dsd->dev,
+            "Frequencies %d-%d -> %d-%d for %d bits and %d channels\n",
+            ri->min, ri->max, range.min, range.max, AXI_DSD_FRAME_WIDTH, axi_dsd_channels(rd->dsd));
+    
+    return snd_interval_refine(hw_param_interval(params, rule->var),
+                               &range);
+}
+#ifdef DEF_HW_RULE_FMT
+static int axi_dsd_hw_rule_format(struct snd_pcm_hw_params *params,
+                                        struct snd_pcm_hw_rule *rule)
+{
+    struct axi_dsd_ruledata *rd = rule->private;
+    struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
+    struct snd_mask nfmt;
+    int rate = params_rate(params);
+    //int slots = rd->mcasp->tdm_slots;
+    int i, count = 0;
+    
+    snd_mask_none(&nfmt);
+    
+    for (i = 0; i < SNDRV_PCM_FORMAT_LAST; i++) {
+        if (snd_mask_test(fmt, i)) {
+            uint sbits = snd_pcm_format_width(i);
+            uint bclk_freq = AXI_DSD_FRAME_WIDTH * axi_dsd_channels(rd->dsd)  * axi_dsd_dai_rates[i];
+            int ppm;
+            
+           /*  if (rd->mcasp->slot_width)
+                sbits = rd->mcasp->slot_width;
+            */
+            axi_dsd_calc_clk_div(rd->dsd, bclk_freq,
+                                       &ppm);
+            if (abs(ppm) < AXI_DSD_MAX_RATE_ERROR_PPM) {
+                snd_mask_set(&nfmt, i);
+                count++;
+            }
+        }
+    }
+    dev_dbg(rd->dsd->dev,
+            "%d possible sample format for %d Hz\n",
+            count, rate);
+    
+    return snd_mask_refine(fmt, &nfmt);
+}
+#endif
+
 
 static int axi_dsd_startup(struct snd_pcm_substream *substream,
 	struct snd_soc_dai *dai)
 {
 	struct axi_dsd *dsd = snd_soc_dai_get_drvdata(dai);
+    struct axi_dsd_ruledata *ruledata = &dsd->ruledata[substream->stream];
+    
+    dsd->substream = substream;
 	uint32_t mask;
 	int ret;
+    
+    dsd->substream = substream;
     
 	ret = snd_pcm_hw_constraint_ratnums(substream->runtime, 0,
 			   SNDRV_PCM_HW_PARAM_RATE,
 			   &dsd->rate_constraints);
 	if (ret)
 		return ret;
+    if (dsd->bclk_div == 0) {
+        int ret;
+        
+        ruledata->dsd = dsd;
+        
+        ret = snd_pcm_hw_rule_add(substream->runtime, 0,
+                                  SNDRV_PCM_HW_PARAM_RATE,
+                                  axi_dsd_hw_rule_rate,
+                                  ruledata,
+                                  SNDRV_PCM_HW_PARAM_FORMAT, -1);
+        if (ret)
+            return ret;
+    }
 
     ret = clk_prepare_enable(dsd->clkA);
     ret = clk_prepare_enable(dsd->clkB);
@@ -288,11 +431,6 @@ static int axi_dsd_dai_probe(struct snd_soc_dai *dai)
 	struct axi_dsd *dsd = snd_soc_dai_get_drvdata(dai);
  //   uint dmaacr_flags,dmaasr_flags;
 
- //   dmaacr_flags = DMAACR_RS;
-    regmap_update_bits(dsd->regmap_dma, AXI_DMA_MM2S_DMACR, DMAACR_Reset, DMAACR_Reset);
-    axi_dsd_wait_dma_done(dsd, 100, 100000);
-    regmap_update_bits(dsd->regmap_dma, AXI_DMA_MM2R_DMAACR, DMAACR_RS, DMAACR_RS);
-    axi_dsd_set_hw_flags(dsd, true);
 
 	snd_soc_dai_init_dma_data(dai, &dsd->playback_dma_data, NULL);
 
@@ -395,8 +533,11 @@ static int axi_dsd_probe(struct platform_device *pdev)
     
     dsd->regmap_axidma = devm_regmap_init_mmio(&pdev_dma->dev, base,
                                                &axi_dma_regmap_config);
+    
+    dsd->dev = &pdev->dev;
+    dsd->dev_dma = &pdev_dma->dev;
 
-	dsd->playback_dma_data.addr = res->start + AXI_DSD_REG_TX_FIFO;
+	dsd->playback_dma_data.addr = res->start + AXI_DMA_MM2S_SA;
 	dsd->playback_dma_data.addr_width = 4;
 	dsd->playback_dma_data.maxburst = 1;
 
