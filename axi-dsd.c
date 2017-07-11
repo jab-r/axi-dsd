@@ -278,13 +278,13 @@ static int axi_dsd_calc_clk_div(struct axi_dsd *dsd,
     int rem; //= mcasp->sysclk_freq % bclk_freq;
     int iclk = axi_dsd_clk_fam(bclk_freq) ? 1 : 0;
 
-    div = dsd->ratnum[iclk].ratnum / bclk_freq;
-    rem = dsd->ratnum[iclk].ratnum % bclk_freq;
+    div = dsd->ratnum[iclk].num / bclk_freq;
+    rem = dsd->ratnum[iclk].num % bclk_freq;
                               
     if (rem != 0) {
         if (div == 0 ||
             ((dsd->ratnum[iclk].ratnum / div) - bclk_freq) >
-            (bclk_freq - (dsd->ratnum[iclk].ratnum / (div+1)))) {
+            (bclk_freq - (dsd->ratnum[iclk].num / (div+1)))) {
             div++;
             rem = rem - bclk_freq;
         }
@@ -387,12 +387,7 @@ static int axi_dsd_startup(struct snd_pcm_substream *substream,
     
     dsd->substream = substream;
     
-	ret = snd_pcm_hw_constraint_ratnums(substream->runtime, 0,
-			   SNDRV_PCM_HW_PARAM_RATE,
-			   &dsd->rate_constraints);
-	if (ret)
-		return ret;
-    if (dsd->bclk_div == 0) {
+    if (dsd->clk_div == 0) {
         int ret;
         
         ruledata->dsd = dsd;
@@ -406,6 +401,13 @@ static int axi_dsd_startup(struct snd_pcm_substream *substream,
             return ret;
     }
 
+    
+    ret = snd_pcm_hw_constraint_ratnums(substream->runtime, 0,
+                                        SNDRV_PCM_HW_PARAM_RATE,
+                                        &dsd->rate_constraints);
+    if (ret)
+        return ret;
+    
     ret = clk_prepare_enable(dsd->clkA);
     ret = clk_prepare_enable(dsd->clkB);
 
@@ -510,8 +512,8 @@ static int axi_dsd_probe(struct platform_device *pdev)
     }
 
     dsd->ratnum[1].num = devm_clk_get_rate(dsd->clkB);
-    dsd->ratnum[1].den_min = CLK_DIV_MIN;
-    dsd->ratnum[1].den_max = CLK_DIV_MAX;
+    dsd->ratnum[1].den_min = 1;
+    dsd->ratnum[1].den_max = 128;
     dsd->ratnum[1].den_step = 1;
     
     dsd->rate_constraints.num = 2;
@@ -541,16 +543,13 @@ static int axi_dsd_probe(struct platform_device *pdev)
 	dsd->playback_dma_data.addr_width = 4;
 	dsd->playback_dma_data.maxburst = 1;
 
+    dev_debug(&pdev->dev,"Clock A rate %d\n", dsd->ratnum[0].num);
+    dev_debug(&pdev->dev,"Clock B rate %d\n", dsd->ratnum[1].num);
 
-	i2s->ratnum.num = clk_get_rate(i2s->clk_ref) / 2 / AXI_I2S_BITS_PER_FRAME;
-	i2s->ratnum.den_step = 1;
-	i2s->ratnum.den_min = 1;
-	i2s->ratnum.den_max = 64;
+	dsd->rate_constraints.rats = &dsd->ratnum;
+	dsd->rate_constraints.nrats = 2;
 
-	i2s->rate_constraints.rats = &i2s->ratnum;
-	i2s->rate_constraints.nrats = 1;
-
-	regmap_write(dsd->regmap_controller, AXI_DSD_REG_RESET, AXI_DSD_RESET_GLOBAL);
+	regmap_write(dsd->regmap_dma, AXI_DMA_DMACR, DMAACR_Reset);
 
 	ret = devm_snd_soc_register_component(&pdev->dev, &axi_dsd_component,
 					 &axi_dsd_dai, 1);
@@ -564,8 +563,9 @@ static int axi_dsd_probe(struct platform_device *pdev)
 	return 0;
 
 err_clk_disable:
-	clk_disable_unprepare(i2s->clk);
-	return ret;
+	// clk_disable_unprepare(dsd->clkA);
+	// clk_disable_unprepare(dsd->clkB);
+    return ret;
 }
 
 static int axi_dsd_dev_remove(struct platform_device *pdev)
