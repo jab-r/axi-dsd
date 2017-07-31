@@ -10,6 +10,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/device.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -23,6 +24,8 @@
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/dmaengine_pcm.h>
+
+#include "axi-dsd.h"
 
 #define AXI_STREAM_FIFO_ISR 0x0
 #define AXI_STREAM_FIFO_IER 0x4
@@ -86,41 +89,81 @@ Receive USER Register(4) C_BASEADDR + x40 Read
 #define AXI_DSD_REG_CHANNELS 0x14
 #define AXI_DSD_REG_MAX 0x18
 
-#define AXI_DSD_PCM_RATES SNDDRV_PCM_RATE_44100|SNDDRV_PCM_RATE_48000|SNDRV_PCM_RATE_88200|SNDRV_PCM_RATE_96000|SNDRV_PCM_RATE_176400|SNDRV_PCM_RATE_192000|SNDRV_PCM_RATE_KNOT
-#define AXI_DSD_PCM_FMTS SNDRV_PCM_FMTBIT_S32_LE | SNDRV_PCM_FMTBIT_U32_LE | SNDDRV_PCM_FMTBIT_DSD_U32_LE
+#define AXI_DSD_PCM_RATES SNDRV_PCM_RATE_44100|SNDRV_PCM_RATE_48000|SNDRV_PCM_RATE_88200|SNDRV_PCM_RATE_96000|SNDRV_PCM_RATE_176400|SNDRV_PCM_RATE_192000|SNDRV_PCM_RATE_KNOT
+#define AXI_DSD_PCM_FMTS SNDRV_PCM_FMTBIT_S32_LE | SNDRV_PCM_FMTBIT_U32_LE | SNDRV_PCM_FMTBIT_DSD_U32_LE
 
 
 #define JBDAC_AXI_CONTROLLER 0x43C00000
 #define JBDAC_AXI_DMA        0X40400000
 
+#define CLK_DIV_MIN 1
+#define CLK_DIV_MAX 64
+struct axi_dsd;
+struct axi_dsd_ruledata {
+    struct axi_dsd *dsd;
+    int serializers;
+};
 struct axi_dsd {
 	struct regmap *regmap_dma;
-    struct regmap *regmap_controller
+    struct regmap *regmap_controller;
 	struct clk *clkA;
 	struct clk *clkB;
     uint bclk_div;
     uint bclk_rate;
+    uint nchan;
     bool clk_fam;
     bool is_dsd;
-    device *dev;
-    device *dev_dma;
+    struct device *dev;
+    struct device *dev_dma;
     
 
 	//struct snd_soc_dai_driver dai_driver;
 
 	struct snd_dmaengine_dai_dma_data playback_dma_data;
+	struct snd_pcm_substream *substream;
 
 	struct snd_ratnum ratnum[2];
+	struct axi_dsd_ruledata ruledata[2];
 	struct snd_pcm_hw_constraint_ratnums rate_constraints;
+
 };
-struct axi_dsd_ruledata {
-    struct axi_dsd *dsd;
-    int serializers;
-};
+
+// regmap_read_poll_timeout(map, addr, val, cond, sleep_us, timeout_us)
+static int axi_dsd_wait_dma_done(struct axi_dsd *dsd, uint sleep_us, uint timeout_us)
+{
+    uint val;
+    return regmap_read_poll_timeout(dsd->regmap_dma, AXI_DMA_MM2S_DMASR ,val, val & (DMASR_Halted|DMASR_Idle), sleep_us, timeout_us);
+}
+static int get_controller_flags(struct axi_dsd *dsd, bool immed)
+{
+    int flags = 0;
+    if (dsd->is_dsd) flags |= AXI_DSD_BIT_DSD;
+    if (dsd->clk_fam) flags |= AXI_DSD_BIT_FAM_CLOCK;
+    if (immed) flags |= AXI_DSD_BIT_RESET_PARAMS;
+    return flags;
+}
+static uint axi_dsd_channels(struct axi_dsd *dsd){ return dsd->nchan; };
+static bool axi_dsd_is_dsd(struct axi_dsd *dsd){ return dsd->is_dsd;};
+static bool is_dsd(snd_pcm_format_t format)
+{
+    switch (format) {
+        case SNDRV_PCM_FORMAT_DSD_U8:
+        case SNDRV_PCM_FORMAT_DSD_U16_LE:
+        case SNDRV_PCM_FORMAT_DSD_U16_BE:
+        case SNDRV_PCM_FORMAT_DSD_U32_LE:
+        case SNDRV_PCM_FORMAT_DSD_U32_BE:
+            return true;
+            break;
+
+        default:
+            return false;
+            break;
+    }
+}
 static int axi_dsd_set_hw_flags(struct axi_dsd *dsd,bool immed)
 {
     regmap_write(dsd->regmap_controller, AXI_DSD_REG_CHANNELS, dsd->nchan);
-    regmap_write(dsd->regmap_controller, AXI_DSD_REG_CLKDIV, dsd->clk_div);
+    regmap_write(dsd->regmap_controller, AXI_DSD_REG_CLKDIV, dsd->bclk_div);
     regmap_write(dsd->regmap_controller, AXI_DSD_REG_RATE, dsd->bclk_rate);
     regmap_write(dsd->regmap_controller, AXI_DSD_REG_CHANNELS, dsd->nchan);
     return regmap_write(dsd->regmap_controller, AXI_DSD_REG_FLAGS, get_controller_flags(dsd,immed) );
@@ -134,11 +177,11 @@ static int axi_dsd_trigger(struct snd_pcm_substream *substream, int cmd,
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
         axi_dsd_set_hw_flags(dsd, true);
-        regmap_update_bits(dsd->regmap_dma, AXI_DMA_MM2R_DMAACR, DMAACR_RS, DMAACR_RS);
+        regmap_update_bits(dsd->regmap_dma, AXI_DMA_MM2S_DMACR, DMACR_RS, DMACR_RS);
             val = 0;
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
-        regmap_update_bits(dsd->regmap_dma, AXI_DMA_MM2S_DMACR, DMAACR_Reset, DMAACR_Reset);
+        regmap_update_bits(dsd->regmap_dma, AXI_DMA_MM2S_DMACR, DMACR_Reset, DMACR_Reset);
 		val = 0;
 		break;
     case SNDRV_PCM_TRIGGER_RESUME:
@@ -157,24 +200,7 @@ static int axi_dsd_trigger(struct snd_pcm_substream *substream, int cmd,
 
 	return val;
 }
-static uint axi_dsd_channels(struct axi_dsd *dsd){ return dsd->nchan; };
-static bool axi_dsd_is_dsd(struct axi_dsd *dsd){ return dsd->is_dsd;};
-static bool is_dsd(snd_pcm_format_t format)
-{
-    switch (format) {
-        case SNDRV_PCM_FORMAT_DSD_U8:
-        case SNDRV_PCM_FORMAT_DSD_U16_LE:
-        case SNDRV_PCM_FORMAT_DSD_U16_BE:
-        case SNDRV_PCM_FORMAT_DSD_U32_LE:
-        case SNDRV_PCM_FORMAT_DSD_U32_BE:
-            return true;
-            break;
-            
-        default:
-            return false;
-            break;
-    }
-}
+
 
 static bool axi_dsd_clk_fam(uint rate)
 {
@@ -202,20 +228,6 @@ static bool axi_dsd_clk_fam(uint rate)
     }
 
 }
-// regmap_read_poll_timeout(map, addr, val, cond, sleep_us, timeout_us)
-static int axi_dsd_wait_dma_done(struct axi_dsd *dsd, uint sleep_us, uint timeout_us)
-{
-    uint val;
-    return regmap_read_poll_timeout(dsd->regmap_dma, AXI_DMA_MM2S_DMASR ,&val, val & (DMASR_Halted|DMASR_Idle), sleep_us, timeout_us);
-}
-static int get_controller_flags(struct axi_dsd *dsd, bool immed)
-{
-    flags = 0;
-    if (dsd->is_dsd) flags |= AXI_DSD_BIT_DSD;
-    if (dsd->clk_fam) flags |= AXI_DSD_BIT_FAM_CLOCK;
-    if (immed) flags |= AXI_DSD_BIT_RESET_PARAMS;
-    return flags;
-}
 
 static int axi_dsd_hw_params(struct snd_pcm_substream *substream,
 	struct snd_pcm_hw_params *params, struct snd_soc_dai *dai)
@@ -226,19 +238,19 @@ static int axi_dsd_hw_params(struct snd_pcm_substream *substream,
 /**
  so ... wait for transfers to be done, then reset device and reset hardware ...
 **/
-    axi_dsd_wait_dma_done(dsd);
+    axi_dsd_wait_dma_done(dsd,1000,100000);
     dsd->is_dsd = is_dsd(params_format(params));
     dsd->nchan = params_channels(params);
     dsd->bclk_rate = params_rate(params) * AXI_DSD_FRAME_WIDTH;
     
     dsd->clk_fam = axi_dsd_clk_fam(params_rate(params));
     
-    if (dsd->clk_fam) then
+    if (dsd->clk_fam)
         rate = dsd->ratnum[0].num;
     else
         rate = dsd->ratnum[1].num;
     
-    dsd->clk_div = rate / dsd->bclk_rate;
+    dsd->bclk_div = rate / dsd->bclk_rate;
     
 
 	//word_size = AXI_DSD_BITS_PER_FRAME / 2 - 1;
@@ -249,6 +261,7 @@ static int axi_dsd_hw_params(struct snd_pcm_substream *substream,
 
 	return 0;
 }
+#ifdef DEF_DSD_DAI_SET_CLKDIV
 static int axi_dsd_dai_set_clkdiv(struct snd_soc_dai *cpu_dai,
                                       int div_id, int div)
 {
@@ -257,9 +270,10 @@ static int axi_dsd_dai_set_clkdiv(struct snd_soc_dai *cpu_dai,
     if (div_id != DAVINCI_MCBSP_CLKGDV)
         return -ENODEV;
     
-    dev->clk_div = div;
+    dev->bclk_div = div;
     return 0;
 }
+#endif
 static const unsigned int axi_dsd_dai_rates[] = {
     44100, 48000,
     88200, 96000,
@@ -283,7 +297,7 @@ static int axi_dsd_calc_clk_div(struct axi_dsd *dsd,
                               
     if (rem != 0) {
         if (div == 0 ||
-            ((dsd->ratnum[iclk].ratnum / div) - bclk_freq) >
+            ((dsd->ratnum[iclk].num / div) - bclk_freq) >
             (bclk_freq - (dsd->ratnum[iclk].num / (div+1)))) {
             div++;
             rem = rem - bclk_freq;
@@ -381,14 +395,11 @@ static int axi_dsd_startup(struct snd_pcm_substream *substream,
 	struct axi_dsd *dsd = snd_soc_dai_get_drvdata(dai);
     struct axi_dsd_ruledata *ruledata = &dsd->ruledata[substream->stream];
     
-    dsd->substream = substream;
-	uint32_t mask;
 	int ret;
     
     dsd->substream = substream;
     
-    if (dsd->clk_div == 0) {
-        int ret;
+    if (dsd->bclk_div == 0) {
         
         ruledata->dsd = dsd;
         
@@ -411,10 +422,10 @@ static int axi_dsd_startup(struct snd_pcm_substream *substream,
     ret = clk_prepare_enable(dsd->clkA);
     ret = clk_prepare_enable(dsd->clkB);
 
-    regmap_update_bits(dsd->regmap_dma, AXI_DMA_MM2S_DMACR, DMAACR_Reset, DMAACR_Reset);
+    regmap_update_bits(dsd->regmap_dma, AXI_DMA_MM2S_DMACR, DMACR_Reset, DMACR_Reset);
     regmap_async_complete(dsd->regmap_dma);
     axi_dsd_set_hw_flags(dsd, true);
-    regmap_update_bits(dsd->regmap_dma, AXI_DMA_MM2R_DMAACR, DMAACR_RS, DMAACR_RS);
+    regmap_update_bits(dsd->regmap_dma, AXI_DMA_MM2S_DMACR, DMACR_RS, DMACR_RS);
 
     return ret;
 }
@@ -479,6 +490,7 @@ static int axi_dsd_probe(struct platform_device *pdev)
 {
 	struct resource *res;
 	struct axi_dsd *dsd;
+	struct platform_device *pdev_dma;
 	void __iomem *base;
 	int ret;
 
@@ -500,7 +512,7 @@ static int axi_dsd_probe(struct platform_device *pdev)
         dev_dbg(&pdev->dev, "unable to get clkA clock, err %d\n", ret);
         return ret;
     }
-    dsd->ratnum[0].num = devm_clk_get_rate(dsd->clkA);
+    dsd->ratnum[0].num = clk_get_rate(dsd->clkA);
     dsd->ratnum[0].den_min = CLK_DIV_MIN;
     dsd->ratnum[0].den_max = CLK_DIV_MAX;
     dsd->ratnum[0].den_step = 1;
@@ -511,21 +523,20 @@ static int axi_dsd_probe(struct platform_device *pdev)
         return ret;
     }
 
-    dsd->ratnum[1].num = devm_clk_get_rate(dsd->clkB);
+    dsd->ratnum[1].num = clk_get_rate(dsd->clkB);
     dsd->ratnum[1].den_min = 1;
     dsd->ratnum[1].den_max = 128;
     dsd->ratnum[1].den_step = 1;
     
-    dsd->rate_constraints.num = 2;
-    dsd->rate_constraints.rats = &dsd->ratnum
+    dsd->rate_constraints.nrats = 2;
+    dsd->rate_constraints.rats = &dsd->ratnum[0];
     
     dsd->regmap_controller = devm_regmap_init_mmio(&pdev->dev, base,
 		&axi_dsd_regmap_config);
-	if (IS_ERR(dsd->regmap))
-		return PTR_ERR(dsd->regmap);
+	if (IS_ERR(dsd->regmap_controller))
+		return PTR_ERR(dsd->regmap_controller);
     
-    platform_device *pdev_dma = platform_device_register_simple("axi-dma", -1, NULL,
-                                                                                 0);
+    pdev_dma = platform_device_register_simple("axi-dma", -1, NULL, 0);
 
     
     res = platform_get_resource(pdev_dma, IORESOURCE_MEM,0);
@@ -533,7 +544,7 @@ static int axi_dsd_probe(struct platform_device *pdev)
     if (IS_ERR(base))
         return PTR_ERR(base);
     
-    dsd->regmap_axidma = devm_regmap_init_mmio(&pdev_dma->dev, base,
+    dsd->regmap_dma = devm_regmap_init_mmio(&pdev_dma->dev, base,
                                                &axi_dma_regmap_config);
     
     dsd->dev = &pdev->dev;
@@ -543,13 +554,11 @@ static int axi_dsd_probe(struct platform_device *pdev)
 	dsd->playback_dma_data.addr_width = 4;
 	dsd->playback_dma_data.maxburst = 1;
 
-    dev_debug(&pdev->dev,"Clock A rate %d\n", dsd->ratnum[0].num);
-    dev_debug(&pdev->dev,"Clock B rate %d\n", dsd->ratnum[1].num);
+    dev_dbg(&pdev->dev,"Clock A rate %d\n", dsd->ratnum[0].num);
+    dev_dbg(&pdev->dev,"Clock B rate %d\n", dsd->ratnum[1].num);
 
-	dsd->rate_constraints.rats = &dsd->ratnum;
-	dsd->rate_constraints.nrats = 2;
 
-	regmap_write(dsd->regmap_dma, AXI_DMA_DMACR, DMAACR_Reset);
+	regmap_write(dsd->regmap_dma, AXI_DMA_MM2S_DMACR, DMACR_Reset);
 
 	ret = devm_snd_soc_register_component(&pdev->dev, &axi_dsd_component,
 					 &axi_dsd_dai, 1);
@@ -592,15 +601,7 @@ static struct platform_driver axi_dsd_driver = {
 	.remove = axi_dsd_dev_remove,
 };
 module_platform_driver(axi_dsd_driver);
-static int axi_dsd_dev_remove(struct platform_device *pdev)
-{
-    struct axi_dsd *dsd = platform_get_drvdata(pdev);
-    
-    clk_disable_unprepare(dsd->clkA);
-    clk_disable_unprepare(dsd->clkB);
-    
-    return 0;
-}
+
 
 
 MODULE_DEVICE_TABLE(of, axi_dsd_of_match);

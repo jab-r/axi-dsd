@@ -1,0 +1,11 @@
+
+config SND_SOC_AXI_DSD
+	tristate "AXI-DSD support"
+	depends on ARM || ARCH_ZYNQ || COMPILE_TEST
+	select SND_DMAENGINE_PCM
+	select AXI_DMA
+	select SND_SOC_GENERIC_DMAENGINE_PCM
+	select REGMAP_MMIO
+	help
+	  ASoC driver for the JABR AXI-DSD softcore peripheral.
+

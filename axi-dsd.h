@@ -32,10 +32,11 @@
 #define AXI_STREAM_FIFO_SRR 0x28 Write(2)
 #define AXI_STREAM_FIFO_TDR 0x2C Write
 #define AXI_STREAM_FIFO_RDR 0x30 Read
-Transmit ID Register(4) C_BASEADDR + x34 Write
+/* Transmit ID Register(4) C_BASEADDR + x34 Write
 Transmit USER Register(4) C_BASEADDR + x38 Write
 Receive ID Register(4) C_BASEADDR + x3C Read
 Receive USER Register(4) C_BASEADDR + x40 Read
+*/
 
 #define AXI_DMA_MM2S_DMACR 0x00 /* DMA control register */
 #define AXI_DMA_MM2S_DMASR 0x04 /* DMA status register */
