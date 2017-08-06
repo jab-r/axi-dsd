@@ -489,6 +489,7 @@ static const struct regmap_config axi_dma_regmap_config = {
 static int axi_dsd_probe(struct platform_device *pdev)
 {
 	struct resource *res;
+	struct resource *r_irq;
 	struct axi_dsd *dsd;
 	struct platform_device *pdev_dma;
 	void __iomem *base;
@@ -512,6 +513,7 @@ static int axi_dsd_probe(struct platform_device *pdev)
         dev_dbg(&pdev->dev, "unable to get clkA clock, err %d\n", ret);
         return ret;
     }
+
     dsd->ratnum[0].num = clk_get_rate(dsd->clkA);
     dsd->ratnum[0].den_min = CLK_DIV_MIN;
     dsd->ratnum[0].den_max = CLK_DIV_MAX;
@@ -569,6 +571,24 @@ static int axi_dsd_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_clk_disable;
 
+	/* Get IRQ for the device */
+	r_irq = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	if (!r_irq) {
+		dev_info(dev, "no IRQ found\n");
+		dev_info(dev, "axi-dsd at 0x%08x mapped to 0x%08x\n",
+			(unsigned int __force)res,
+			(unsigned int __force)base);
+		return 0;
+	}
+	dsd->irq = r_irq->start;
+	ret = request_irq(dsd->irq, &axi_dsd_irq, 0, DRIVER_NAME, dsd);
+	if (ret) {
+		dev_err(dev, "axi-dsd: Could not allocate interrupt %d.\n",
+			dsd->irq);
+		free_irq(r_irq,dsd);
+		goto err_clk_disable;
+	}
+
 	return 0;
 
 err_clk_disable:
@@ -583,7 +603,11 @@ static int axi_dsd_dev_remove(struct platform_device *pdev)
     
     clk_disable_unprepare(dsd->clkA);
     clk_disable_unprepare(dsd->clkB);
-    
+	struct device *dev = &pdev->dev;
+	free_irq(dsd->irq, dsd);
+	kfree(dsd);
+	dev_set_drvdata(dev, NULL);
+	return 0;
     return 0;
 }
 static const struct of_device_id axi_dsd_of_match[] = {
@@ -600,6 +624,24 @@ static struct platform_driver axi_dsd_driver = {
 	.probe = axi_dsd_probe,
 	.remove = axi_dsd_dev_remove,
 };
+static int __init axi_dsd_init(void)
+{
+	printk("<1>Hello AXI-DSD\n");
+	printk("<1>Module parameters were (0x%08x) and \"%s\"\n", myint,
+	       mystr);
+
+	return platform_driver_register(&axi_dsd_driver);
+}
+
+
+static void __exit axi_dsd_exit(void)
+{
+	platform_driver_unregister(&axi_dsd_driver);
+	printk(KERN_ALERT "Goodbye module world.\n");
+}
+
+module_init(axi_dsd_init);
+module_exit(axi_dsd_exit);
 module_platform_driver(axi_dsd_driver);
 
 
