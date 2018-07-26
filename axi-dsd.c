@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 JAB Research LLC
+ * Copyright (C) 2017-2018 JAB Research LLC
  * Author: Jonathan Borden <jonathan@jabresearch.com>
  *
  * Xilinx zynq based DAC PCM/DSD interface
@@ -104,13 +104,15 @@ struct axi_dsd_ruledata {
     int serializers;
 };
 struct axi_dsd {
-	struct regmap *regmap_dma;
+    struct regmap *regmap_dma;
     struct regmap *regmap_controller;
-	struct clk *clkA;
-	struct clk *clkB;
+//	struct clk *clkA;
+//	struct clk *clkB;
     uint bclk_div;
     uint bclk_rate;
+    uint sample_rate;
     uint nchan;
+    uint physical_width;
     bool clk_fam;
     bool is_dsd;
     struct device *dev;
@@ -134,6 +136,7 @@ static int axi_dsd_wait_dma_done(struct axi_dsd *dsd, uint sleep_us, uint timeou
     uint val;
     return regmap_read_poll_timeout(dsd->regmap_dma, AXI_DMA_MM2S_DMASR ,val, val & (DMASR_Halted|DMASR_Idle), sleep_us, timeout_us);
 }
+/*
 static int get_controller_flags(struct axi_dsd *dsd, bool immed)
 {
     int flags = 0;
@@ -142,6 +145,7 @@ static int get_controller_flags(struct axi_dsd *dsd, bool immed)
     if (immed) flags |= AXI_DSD_BIT_RESET_PARAMS;
     return flags;
 }
+*/
 static uint axi_dsd_channels(struct axi_dsd *dsd){ return dsd->nchan; };
 static bool axi_dsd_is_dsd(struct axi_dsd *dsd){ return dsd->is_dsd;};
 static bool is_dsd(snd_pcm_format_t format)
@@ -162,10 +166,11 @@ static bool is_dsd(snd_pcm_format_t format)
 }
 static int axi_dsd_set_hw_flags(struct axi_dsd *dsd,bool immed)
 {
+    // regmap_write(dsd->regmap_controller, AXI_DSD_REG_CLKDIV, dsd->bclk_div);
+    regmap_write(dsd->regmap_controller, AXI_DSD_REG_FORMAT, dsd->format);
+    regmap_write(dsd->regmap_controller, AXI_DSD_REG_RATE, dsd->sample_rate);
     regmap_write(dsd->regmap_controller, AXI_DSD_REG_CHANNELS, dsd->nchan);
-    regmap_write(dsd->regmap_controller, AXI_DSD_REG_CLKDIV, dsd->bclk_div);
-    regmap_write(dsd->regmap_controller, AXI_DSD_REG_RATE, dsd->bclk_rate);
-    regmap_write(dsd->regmap_controller, AXI_DSD_REG_CHANNELS, dsd->nchan);
+    regmap_write(dsd->regmap_controller, AXI_DSD_REG_PHYSICAL_WIDTH, dsd->physical_width);
     return regmap_write(dsd->regmap_controller, AXI_DSD_REG_FLAGS, get_controller_flags(dsd,immed) );
 }
 static int axi_dsd_trigger(struct snd_pcm_substream *substream, int cmd,
@@ -240,14 +245,19 @@ static int axi_dsd_hw_params(struct snd_pcm_substream *substream,
 **/
     axi_dsd_wait_dma_done(dsd,1000,100000);
     dsd->is_dsd = is_dsd(params_format(params));
+    dsd->format = params_format(params);
     dsd->nchan = params_channels(params);
-    dsd->bclk_rate = params_rate(params) * AXI_DSD_FRAME_WIDTH;
+    dsd->physical_width = params_physical_width(params);
+    if (dsd->is_dsd)
+      dsd->bclk_rate = params_rate(params) * AXI_DSD_FRAME_WIDTH;
+    else
+      dsd->bclk_rate = params_rate(params);
     
-    dsd->clk_fam = axi_dsd_clk_fam(params_rate(params));
+     dsd->clk_fam = axi_dsd_clk_fam(dsd->bclk_rate);
     
     if (dsd->clk_fam)
         rate = dsd->ratnum[0].num;
-    else
+     else
         rate = dsd->ratnum[1].num;
     
     dsd->bclk_div = rate / dsd->bclk_rate;
@@ -388,7 +398,7 @@ static int axi_dsd_hw_rule_format(struct snd_pcm_hw_params *params,
 }
 #endif
 
-
+*** this needs work ... define rules ...
 static int axi_dsd_startup(struct snd_pcm_substream *substream,
 	struct snd_soc_dai *dai)
 {

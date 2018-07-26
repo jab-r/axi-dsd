@@ -1,0 +1,36 @@
+/* copyright (c) 2017 Jonathan Borden
+all rights reservd
+*/
+/ {
+
+compatible { "jabr,axi-dsd" };
+
+clocks {
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		audio_clock_a : audio_clock_a {
+			compatible = "jabr,axi-dsd", "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <45158400>;
+		};
+		audio_clock_b : audio_clock_b {
+			compatible = "jabr,axi-dsd", "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <49152000>;
+		};
+	};
+
+axi_dsd_0: axi-dsd@43C00000 {
+
+		compatible = "jabr,axi-dsd-1.00.a";"jabr,axi-dsd"
+		reg = <0x43C00000 0x1000>;
+		interrupts = < 0 59 1 >;
+        interrupt-parent = <&gic>;                                                                                                      
+		clocks = <&fpga_clock &audio_clock_a &audio_clock_b>;                                                                                            
+		clock-names = "axi", "clkA", "clkB";
+		dmas = <&ps7_dma 0>;                                                                                                 
+		dma-names = "tx";      
+    };
+
+};
