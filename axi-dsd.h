@@ -75,14 +75,15 @@ Receive USER Register(4) C_BASEADDR + x40 Read
 /* The frame size is configurable, but for now we always set it 64 bit */
 #define AXI_I2S_BITS_PER_FRAME 64
 
-#define AXI_DSD_BIT_DSD BIT(0)
-#define AXI_DSD_BIT_PCM BIT(1)
-#define AXI_DSD_BIT_FAM_CLOCK BIT(2)
-#define AXI_DSD_BIT_RESET_PARAMS BIT(3)
+//#define AXI_DSD_BIT_DSD BIT(0)
+//#define AXI_DSD_BIT_PCM BIT(1)
+//#define AXI_DSD_BIT_FAM_CLOCK BIT(2)
+#define AXI_DSD_BIT_RESET_PARAMS BIT(0)
 #define AXI_DSD_REG_FLAGS 0x00
-#define AXI_DSD_REG_VOLUME 0x04
+#define AXI_DSD_REG_FORMAT 0x04
 #define AXI_DSD_REG_RATE 0x08
-#define AXI_DSD_REG_CLKDIV 0x0C
+#define AXI_DSD_REG_PHYSICAL_WIDTH 0x0C
+#define AXI_DSD_REG_CHANNELS 0x0D
 #define AXI_DSD_REG_PCM_MODE 0x10
 #define AXI_DSD_REG_CHANNELS 0x14
 

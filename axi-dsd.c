@@ -136,16 +136,16 @@ static int axi_dsd_wait_dma_done(struct axi_dsd *dsd, uint sleep_us, uint timeou
     uint val;
     return regmap_read_poll_timeout(dsd->regmap_dma, AXI_DMA_MM2S_DMASR ,val, val & (DMASR_Halted|DMASR_Idle), sleep_us, timeout_us);
 }
-/*
+
 static int get_controller_flags(struct axi_dsd *dsd, bool immed)
 {
     int flags = 0;
-    if (dsd->is_dsd) flags |= AXI_DSD_BIT_DSD;
-    if (dsd->clk_fam) flags |= AXI_DSD_BIT_FAM_CLOCK;
+    //if (dsd->is_dsd) flags |= AXI_DSD_BIT_DSD;
+    //if (dsd->clk_fam) flags |= AXI_DSD_BIT_FAM_CLOCK;
     if (immed) flags |= AXI_DSD_BIT_RESET_PARAMS;
     return flags;
 }
-*/
+
 static uint axi_dsd_channels(struct axi_dsd *dsd){ return dsd->nchan; };
 static bool axi_dsd_is_dsd(struct axi_dsd *dsd){ return dsd->is_dsd;};
 static bool is_dsd(snd_pcm_format_t format)
@@ -169,8 +169,8 @@ static int axi_dsd_set_hw_flags(struct axi_dsd *dsd,bool immed)
     // regmap_write(dsd->regmap_controller, AXI_DSD_REG_CLKDIV, dsd->bclk_div);
     regmap_write(dsd->regmap_controller, AXI_DSD_REG_FORMAT, dsd->format);
     regmap_write(dsd->regmap_controller, AXI_DSD_REG_RATE, dsd->sample_rate);
-    regmap_write(dsd->regmap_controller, AXI_DSD_REG_CHANNELS, dsd->nchan);
-    regmap_write(dsd->regmap_controller, AXI_DSD_REG_PHYSICAL_WIDTH, dsd->physical_width);
+    regmap_update_bits(dsd->regmap_controller, AXI_DSD_REG_CHANNELS, 0xFF, dsd->nchan);
+    regmap_update_bits(dsd->regmap_controller, AXI_DSD_REG_PHYSICAL_WIDTH, 0xFF, dsd->physical_width);
     return regmap_write(dsd->regmap_controller, AXI_DSD_REG_FLAGS, get_controller_flags(dsd,immed) );
 }
 static int axi_dsd_trigger(struct snd_pcm_substream *substream, int cmd,
@@ -251,9 +251,9 @@ static int axi_dsd_hw_params(struct snd_pcm_substream *substream,
     if (dsd->is_dsd)
       dsd->bclk_rate = params_rate(params) * AXI_DSD_FRAME_WIDTH;
     else
-      dsd->bclk_rate = params_rate(params);
+      dsd->bclk_rate = params_rate(params) * params_physical_width(params);
     
-     dsd->clk_fam = axi_dsd_clk_fam(dsd->bclk_rate);
+     dsd->clk_fam = axi_dsd_clk_fam(params_rate(params));
     
     if (dsd->clk_fam)
         rate = dsd->ratnum[0].num;
